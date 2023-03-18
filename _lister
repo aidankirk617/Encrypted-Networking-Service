@@ -1,0 +1,310 @@
+##
+# CS325 Project 3
+#
+# Author: Aidan Kirk and Ethan Mays
+#
+# Version: 11/30/22
+#
+# Description: Program that allows secure communication between two parties over a network using TCP/IP
+# encryption and nonce values. Users are able to generate an RSA key pair, view RSA key pairs and send and receive
+# messages.
+##
+
+# Imports
+import helper
+import random
+import socket
+import os
+import sys
+from Crypto.Util.Padding import pad, unpad
+from Crypto.Random import get_random_bytes
+from Crypto.PublicKey import RSA
+from Crypto.Hash import SHA256
+from Crypto.Cipher import AES, PKCS1_OAEP
+from ipaddress import ip_address
+
+
+# Magic Numbers
+PORT = 65432
+TIMEOUT = 30.0
+MAX_LENGTH = 4096
+BUFF_SIZE = 1024
+END_MSG = "#<<END>>#"
+MY_KEYS_DIR = "my_key_pairs/"
+RSA_EXTN = ".rsa"  
+AES_EXTN = ".aes"  
+RSA_KEY_SIZE = 2048
+IV_SIZE = 16
+HASH_SIZE = 32
+BYTES = 8
+MED_KEY = 192
+
+
+def menu():
+    """
+    Allows user to select various functions of the program through a menu interface
+    """
+    print("===Secure Communicator===")
+    print("----Main Menu----")
+    print("1: Generate RSA Key Pair \n2: View RSA Key Pairs\n3: Send Message\n4: Receive Message"
+          "\n0: Exit")
+          
+
+def do_option(option):
+    """
+    Responds to a menu option by calling the appropriate function. If an option
+    that is <= 0 and > 4  or not an int is specified, an error message will be
+    printed.
+    Args:
+        option : (int) The selected option.
+    """
+    if option == '1':
+        gen_rsa_key_pair()
+    elif option == '2':
+        view_rsa_key_pairs()
+    elif option == '3':
+        send()
+    elif option == '4':
+        receive()
+    elif option == '0':
+        print("Exiting.. ")
+        exit()
+    else:
+        print("\nError: Invalid option!\n")
+        
+
+def gen_rsa_key_pair():
+    """
+    Creates a set of RSA encryption keys (public, private). Makes use of the Crypto.PublicKey module.
+    """
+    file_name = ""
+    is_empty = True
+
+    # Loop continuously until user inputs proper filename
+    while is_empty:
+        # Prompt user for filename
+        file_name = input("Enter name for key pair: ")
+        # Make sure filename is properly inputted
+        if file_name != "":
+            is_empty = False
+            print("Error: filename not provided")
+
+
+    # Generate RSA keys
+    keys = RSA.generate(RSA_KEY_SIZE)
+
+    # CHANGE?
+    # Remove the .rsa extension if it's there to prevent repetition
+    if RSA_EXTN in file_name:
+        file_name = file_name.replace(RSA_EXTN, "")
+
+    # Create filenames
+    prv_name = MY_KEYS_DIR + file_name + "_prv" + RSA_EXTN
+    pub_name = MY_KEYS_DIR + file_name + "_pub" + RSA_EXTN
+
+    # Open the public and private key files
+    prv_file = open(prv_name, "wb")
+    pub_file = open(pub_name, "wb")
+
+    # Convert files to PEM format
+    prv_file.write(keys.exportKey("PEM"))
+    pub_file.write(keys.public_key().exportKey("PEM"))
+
+    # Close keys
+    prv_file.close()
+    pub_file.close()
+
+    # Let user know both keys have been generated 
+    print("Key pair", prv_name, "and", pub_name, "generated")
+    
+
+def view_rsa_key_pairs():
+    """
+    Lists all .rsa files in the 'my_key_pairs directory'.
+    """
+
+    own_pairs_list = helper.file_lister(MY_KEYS_DIR, RSA_EXTN)
+
+    # Show all RSA key pairs
+    print("\n======RSA Key Pairs======\n")
+    helper.print_list(own_pairs_list)
+
+
+def view_pub_rsa_keys():
+    """
+    """
+    all_pairs = helper.file_lister(MY_KEYS_DIR, RSA_EXTN)
+    for key in all_pairs:
+        if "_pub" not in key:
+            all_pairs.remove(key)
+    print("\n======Public Keys======\n")
+    print_list(all_pairs)
+    
+        
+def gen_aes_key():
+    """
+    Generates an AES symmetric key for use in sending.
+    """
+    length = int(MED_KEY / BYTES)
+    key = get_random_bytes(length)
+    print("Generating one-time symmetric key")
+    return key
+    
+def encrypt_with_pub_key(pub_key, data_to_encrypt):
+    """
+    """
+    cipher = PKCS1_OAEP.new(pub_key)
+    try:
+        ciphertext = cipher.encrypt(data_to_encrypt)
+    except ValueError:
+        print("Data too long to encrypt!")
+        return
+    print("Hashing and encrypting.")
+    return ciphertext
+
+    
+def generate_nonce_seed():
+    """
+    Generates a nonce value that both the sender and recipient can use to verify
+    data integrity
+    Returns:
+           nonce:
+           seed:
+    """
+    seed = random.randint(0, MAX_LENGTH)
+    random.seed(seed)
+    nonce = random.randint(0, MAX_LENGTH)
+    return nonce, seed
+
+    
+def send():
+    """
+    Prompts user for recepient IP address, as well as the users message before sending it to the
+    recipient.
+    """
+    # Assign public keys path to a variable for ease of use
+    pub_key = helper.get_key_path("_pub")
+
+    # Retrieve the IP address
+    address = get_ip_send()
+
+    # Open the public key
+    f = open(pub_key, "rb")
+    sock = None
+
+    try:
+        # Create the socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        # Set the sockets timeout
+        sock.settimeout(TIMEOUT)
+
+        # Connect the socket
+        sock.connect((address, PORT))
+        sock.settimeout(None)
+
+        # Send the key over the network
+        print("Sending public key...")
+        sock.sendall(f.read())
+        print("Waiting...")
+
+        # Retrieve the AES key
+        received_aes = sock.recv(BUFF_SIZE)
+        print("Received symmetric key from", address)
+        decrypted = decrypt_with_prv(received_aes)
+
+    # Throw error messages when appropriate
+    except ConnectionRefusedError:
+        print("Connection was refused.")
+    except InterruptedError:
+        print("Message sending error. Message not sent.")
+    except TimeoutError:
+        print("Message receipt failed.")
+    except OSError:
+        print("Message sending error. Could not connect.")
+    finally:
+        if sock is not None:
+            sock.close()
+            
+
+def receive():
+    """
+    Recipient user receives messages sent from the send() function.
+    """
+
+    # Constants
+    address = get_ip_receive()
+    sock = None
+
+    try:
+        # Create the socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind((address, PORT))
+
+        # Begin listening on the socket
+        sock.listen()
+        print("Waiting for message...")
+
+        # Accept connection upon arrival of public key
+        conn, addr = sock.accept()
+        with conn:
+            conn.settimeout(TIMEOUT)
+            waiting_to_receive = True
+            pub_key = None
+
+            # Receive public key
+            while waiting_to_receive:
+                received_key = conn.recv(BUFF_SIZE)
+                if not received_key:
+                    waiting_to_receive = False
+                else:
+                    print("Received public key")
+                    pub_key = received_key.decode()
+
+                # Check public key for validity
+                key_obj = RSA.importKey(pub_key)
+                if key_obj.has_private():
+                    print("Error: bad stuff")
+                    raise ValueError
+
+                # generate the aes key, nonce, seed and concatenate them together 
+                aes_key = gen_aes_key()
+                nonce, seed = generate_nonce_seed()
+                data = aes_key + str(nonce).encode() + str(seed).encode() + "1".encode()
+
+                # Generate a SHA256 hash and create packet
+                sha = SHA256.new(data)
+                to_send = sha.digest() + data
+
+                # Encrypt and send the packet
+                ciphertext = encrypt_with_pub_key(key_obj, to_send)
+                print("Sending symmetric key to", addr[0])
+                sock.settimeout(None)
+                conn.sendall(ciphertext)
+
+    # Prompt user for error checking when appropriate
+    except TimeoutError:
+        print("Timed out.")
+    except InterruptedError:
+        print("Message receiving error.")
+    except (ValueError, IndexError, TypeError):
+        print("Invalid Key")
+    finally:
+        if sock is not None:
+            sock.close()
+    
+    
+def main():
+    """
+    Main method of the program
+    """
+    menu()
+    option = input("Enter Option: ")
+    while option != 0:
+        do_option(option)
+        menu()
+        option = input("Enter Option: ")
+        
+
+if __name__ == "__main__":
+    main()
